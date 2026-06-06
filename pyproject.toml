@@ -1,0 +1,22 @@
+[project]
+name = "ai-memory"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi[standard]>=0.136.3",
+    "fastembed>=0.8.0",
+    "huggingface-hub>=1.16.1",
+    "llama-index-core>=0.14.22",
+    "llama-index-embeddings-huggingface>=0.7.0",
+    "llama-index-llms-ollama>=0.10.1",
+    "llama-index-readers-file>=0.6.0",
+    "llama-index-vector-stores-qdrant>=0.10.1",
+    "qdrant-client>=1.18.0",
+    "redis>=7.4.0",
+    "sentence-transformers>=5.5.1",
+    "torch>=2.10.0",
+    "transformers>=5.9.0",
+    "uvicorn>=0.48.0",
+]
