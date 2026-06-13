@@ -1,4 +1,5 @@
 # src/services/vector_services.py
+from datetime import datetime, timezone
 from typing import Union
 from uuid import uuid4
 
@@ -28,7 +29,7 @@ class VectorService:
         """
         Create a collection in Qdrant if it doesn't exist.
         """
-        sample_embedding = self.embed_text("test")
+        sample_embedding = self.embed_text(["test"])[0]
         if not self._qdrant_client.collection_exists(self._collection_name):
             self._qdrant_client.create_collection(
                 collection_name=self._collection_name,
@@ -51,7 +52,7 @@ class VectorService:
             self.delete_collection()
         self._qdrant_client.close()
 
-    def embed_text(self, text: str) -> list[float]:
+    def embed_text(self, chunks: list[str]) -> list[list[float]]:
         """
         Embed the given text using the embedding model.
         iter and next is used to get the first (and only) embedding
@@ -61,7 +62,7 @@ class VectorService:
             but we can also use next() function like this:
                 return next(iter(self._embedding_model.embed([text]))).tolist()
         """
-        return iter(self._embedding_model.embed([text])).__next__().tolist()
+        return [arr.tolist() for arr in self._embedding_model.embed(chunks)]
 
     def chunk(
         self,
@@ -130,25 +131,28 @@ class VectorService:
                 )
             )
 
-        """
-        Store the given text in the collection after embedding it.
+        embedded_chunks = self.embed_text(chunks)
 
-        There is only one because we are embedding a single text.
-        If we were embedding multiple texts, we would have multiple vectors.
-        When chunking there will be multiple vectors for a single text, but for now we are not doing that.
-        """
         points: list[PointStruct] = []
-        for idx, chunk in enumerate(chunks):
+        document_id = str(uuid4())
+        created_at = datetime.now(timezone.utc).isoformat()
+
+        for idx, (embedded_chunk, raw_chunk) in enumerate(zip(embedded_chunks, chunks)):
+            payload = {
+                "original_chunk": raw_chunk,
+                "chunk_index": idx,
+                "document_id": document_id,  # same id for all chunks from the same document or text
+                "is_file_chunk": isinstance(data, UploadFile),
+                "embedding_created_at": created_at,
+            }
+            if isinstance(data, UploadFile):
+                payload["filename"] = data.filename
+
             points.append(
                 PointStruct(
-                    id=str(uuid4()),  # generate a unique ID for each point
-                    vector=self.embed_text(
-                        chunk
-                    ),  # embed the chunk to get the vector representation
-                    payload={
-                        "chunk": chunk,
-                        "chunk_index": idx,
-                    },  # store the original text as payload for retrieval
+                    id=str(uuid4()),  # generate a unique ID for each chunk
+                    vector=embedded_chunk,
+                    payload=payload,
                 )
             )
         self._qdrant_client.upsert(collection_name=self._collection_name, points=points)
@@ -163,7 +167,7 @@ class VectorService:
         Returns:
             QueryResponse: The search results containing the nearest points to the query.
         """
-        query_vector = self.embed_text(query)
+        query_vector = self.embed_text([query])[0]
         search_result = self._qdrant_client.query_points(
             collection_name=self._collection_name,
             query=query_vector,
