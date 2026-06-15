@@ -1,15 +1,11 @@
 # src/services/vector_services.py
+
 from datetime import datetime, timezone
-from typing import Union
 from uuid import uuid4
 
 import qdrant_client
-from fastapi import UploadFile
-from fastembed import TextEmbedding
 from qdrant_client.conversions.common_types import QueryResponse
 from qdrant_client.models import Distance, PointStruct, VectorParams
-
-from src.services.chunking_technique import TECHNIQUES, ChunkingTechnique
 
 
 class VectorService:
@@ -18,18 +14,15 @@ class VectorService:
     For now it will be minimum with only things i have learnt till now.
     """
 
-    def __init__(self, collection_name: str, chunk_technique: ChunkingTechnique):
+    def __init__(self, collection_name: str, sample_embedding: list[float]):
         self._collection_name = collection_name
         self._qdrant_client = qdrant_client.QdrantClient(path="./qdrant/qdrant.db")
-        self._embedding_model = TextEmbedding()
-        self._chunk_technique = chunk_technique
-        self.create_collection()
+        self.create_collection(sample_embedding)
 
-    def create_collection(self):
+    def create_collection(self, sample_embedding: list[float]):
         """
         Create a collection in Qdrant if it doesn't exist.
         """
-        sample_embedding = self.embed_text(["test"])[0]
         if not self._qdrant_client.collection_exists(self._collection_name):
             self._qdrant_client.create_collection(
                 collection_name=self._collection_name,
@@ -52,125 +45,45 @@ class VectorService:
             self.delete_collection()
         self._qdrant_client.close()
 
-    def embed_text(self, chunks: list[str]) -> list[list[float]]:
-        """
-        Embed the given text using the embedding model.
-        iter and next is used to get the first (and only) embedding
-        from the list returned by the embed method.
+    def _now(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
 
-        I used __next__ as it is easy to read and understand,
-            but we can also use next() function like this:
-                return next(iter(self._embedding_model.embed([text]))).tolist()
-        """
-        return [arr.tolist() for arr in self._embedding_model.embed(chunks)]
+    def _create_points(
+        self, embedded_list: list[list[float]], original_chunk: list[str], **kwargs
+    ) -> list[PointStruct]:
+        point_list: list[PointStruct] = []
+        payload = {}
+        payload["document_id"] = kwargs.get(
+            "document_id",
+        )
+        payload["is_file_source"] = kwargs.get("is_file_source", False)
+        payload["vector_created_at"] = kwargs.get("vector_created_at", self._now())
+        if filename := kwargs.get("filename", None):
+            payload["filename"] = filename
 
-    def chunk(
-        self,
-        text: Union[str, bytes],
-        chunk_size: int = 512,
-        chunk_overlap: int = 20,
-        technique: TECHNIQUES = "recursive",
-        **kwargs,
-    ) -> list[str]:
-        """
-        Chunk the given text into smaller pieces of the specified size.
-        This is a simple implementation and can be improved to handle edge cases.
-        """
-        if isinstance(text, str):
-            return self._chunk_technique.chunk(
-                text=text,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                technique=technique,
-            )
-        return self._chunk_technique.chunk(
-            text=text.decode("utf-8"),
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            technique=technique,
-            **kwargs,
+        for idx, (emb, ori) in enumerate(zip(embedded_list, original_chunk)):
+            payload["original_chunk"] = ori
+            payload["chunk_index"] = idx
+
+            point_list.append(PointStruct(id=str(uuid4()), vector=emb, payload=payload))
+
+        return point_list
+
+    # def save
+    def save(
+        self, *, embedded_list: list[list[float]], original_chunk: list[str], **kwargs
+    ):
+        if not embedded_list:
+            return
+        points = self._create_points(embedded_list, original_chunk, **kwargs)
+        self._qdrant_client.upsert(self._collection_name, points=points)
+
+    # def retrieve
+    def retrieve(
+        self, *, query: list[float], top_k: int = 5, **kwargs
+    ) -> QueryResponse:
+        response = self._qdrant_client.query_points(
+            collection_name=self._collection_name, query=query, limit=top_k
         )
 
-    async def store(self, data: Union[str, UploadFile]):
-        """
-        Store the given text or document in the collection after embedding it.
-         - If the input is a string, it will be chunked and each chunk will be embedded and stored as a point in the collection.
-         - If the input is an UploadFile, it will be read, chunked, and each chunk will be embedded and stored as a point in the collection.
-         - The original text of each chunk will be stored as payload for retrieval during search.
-         - Each point will have a unique ID generated using uuid4.
-         - The embedding of each chunk will be stored as the vector representation in the collection.
-         - The method is asynchronous to handle file reading operations efficiently.
-         - The chunking technique can be specified to control how the text is split into chunks.
-         - The method ensures that the collection is created before storing any points.
-
-        Args:
-            data (Union[str, UploadFile]): The text or document to be stored.
-
-        Returns:
-            None
-        """
-        chunks: list[str] = []
-        if isinstance(data, UploadFile):
-            byte = await data.read()
-            chunks.extend(
-                self.chunk(
-                    text=byte,
-                    chunk_size=512,
-                    chunk_overlap=20,
-                    technique="markdown",
-                    filename=data.filename,
-                )
-            )
-        elif isinstance(data, str):
-            chunks.extend(
-                self.chunk(
-                    text=data,
-                    chunk_size=512,
-                    chunk_overlap=20,
-                    technique="recursive",
-                )
-            )
-
-        embedded_chunks = self.embed_text(chunks)
-
-        points: list[PointStruct] = []
-        document_id = str(uuid4())
-        created_at = datetime.now(timezone.utc).isoformat()
-
-        for idx, (embedded_chunk, raw_chunk) in enumerate(zip(embedded_chunks, chunks)):
-            payload = {
-                "original_chunk": raw_chunk,
-                "chunk_index": idx,
-                "document_id": document_id,  # same id for all chunks from the same document or text
-                "is_file_chunk": isinstance(data, UploadFile),
-                "embedding_created_at": created_at,
-            }
-            if isinstance(data, UploadFile):
-                payload["filename"] = data.filename
-
-            points.append(
-                PointStruct(
-                    id=str(uuid4()),  # generate a unique ID for each chunk
-                    vector=embedded_chunk,
-                    payload=payload,
-                )
-            )
-        self._qdrant_client.upsert(collection_name=self._collection_name, points=points)
-
-    def search(self, query: str) -> QueryResponse:
-        """
-        Search for the given query in the collection and return the nearest points.
-
-        Args:
-            query (str): The query text to search for.
-
-        Returns:
-            QueryResponse: The search results containing the nearest points to the query.
-        """
-        query_vector = self.embed_text([query])[0]
-        search_result = self._qdrant_client.query_points(
-            collection_name=self._collection_name,
-            query=query_vector,
-            limit=5,
-        )
-        return search_result
+        return response
