@@ -1,10 +1,9 @@
 # src/services/chunking_technique.py
 
 
-import io
 from typing import Literal
 
-TECHNIQUES = Literal["simple", "character", "recursive", "markdown"]
+TECHNIQUES = Literal["simple", "character", "recursive", "sentenceSplitter"]
 
 
 class ChunkingTechnique:
@@ -12,8 +11,7 @@ class ChunkingTechnique:
     A class to handle different chunking techniques for text processing.
     """
 
-    @staticmethod
-    def chunk_text(text: str, chunk_size: int = 1000) -> list[str]:
+    def _chunk_text(self, text: str, chunk_size: int = 1000) -> list[str]:
         """
         Chunk the given text into smaller pieces of specified size.
 
@@ -26,9 +24,8 @@ class ChunkingTechnique:
         """
         return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
 
-    @staticmethod
-    def langchain_character_text_splitter(
-        text: str, chunk_size: int = 512, chunk_overlap: int = 20
+    def _langchain_character_text_splitter(
+        self, text: str, chunk_size: int = 512, chunk_overlap: int = 20
     ) -> list[str]:
         """
         Use LangChain's RecursiveCharacterTextSplitter to split the text into chunks.
@@ -49,9 +46,8 @@ class ChunkingTechnique:
         )
         return splitter.split_text(text)
 
-    @staticmethod
-    def langchain_recursive_character_text_splitter(
-        text: str, chunk_size: int = 512, chunk_overlap: int = 20
+    def _langchain_recursive_character_text_splitter(
+        self, text: str, chunk_size: int = 512, chunk_overlap: int = 20
     ) -> list[str]:
         """
         Use LangChain's RecursiveCharacterTextSplitter to split the text into chunks.
@@ -73,61 +69,16 @@ class ChunkingTechnique:
         )
         return splitter.split_text(text)
 
-    @staticmethod
-    def chunk_document(
-        file_bytes: bytes,
-        payload: dict[str, str],
-        chunk_size: int = 512,
-        chunk_overlap: int = 20,
-        technique: TECHNIQUES = "recursive",
-    ) -> list[str]:
-        """
-        Chunk the content of the given document into smaller pieces of specified size.
+    def _llamaindex_sentence_splitter(
+        self, text: str, chunk_size: int = 512, chunk_overlap: int = 50
+    ):
+        from llama_index.core.node_parser import SentenceSplitter
 
-        Args:
-            file_bytes (bytes): The content of the document in bytes.
-            payload (dict[str, str]): The metadata of the document, including filename.
-            chunk_size (int): The size of each chunk.
-            chunk_overlap (int): The number of overlapping characters between chunks.
-            technique (TECHNIQUES): The chunking technique to be used.
-
-        Returns:
-            list[str]: A list of text chunks from the document.
-        """
-        if payload.get("filename") is None:
-            return []
-
-        txt = ""
-
-        match payload.get("filename", "").split(".")[-1].lower():
-            case "pdf":
-                import pymupdf
-
-                content = io.BytesIO(file_bytes)
-                pdf_reader = pymupdf.open(stream=content, filetype="pdf")
-                for page in pdf_reader:
-                    txt += page.get_text() + "\n"  # type: ignore[union-attr]
-            case "txt" | "md" | _:
-                txt = file_bytes.decode("utf-8")
-
-        match technique:
-            case "simple":
-                return ChunkingTechnique.chunk_text(txt, chunk_size)
-            case "character":
-                return ChunkingTechnique.langchain_character_text_splitter(
-                    txt, chunk_size, chunk_overlap=chunk_overlap
-                )
-            case "markdown":
-                from langchain_text_splitters import MarkdownTextSplitter
-
-                splitter = MarkdownTextSplitter(
-                    chunk_size=chunk_size, chunk_overlap=chunk_overlap
-                )
-                return splitter.split_text(txt)
-            case "recursive" | _:
-                return ChunkingTechnique.langchain_recursive_character_text_splitter(
-                    txt, chunk_size, chunk_overlap=chunk_overlap
-                )
+        splitter = SentenceSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+        return splitter.split_text(text)
 
     def chunk(
         self,
@@ -136,7 +87,6 @@ class ChunkingTechnique:
         chunk_size: int = 512,
         chunk_overlap: int = 20,
         technique: TECHNIQUES = "recursive",
-        **kwargs,
     ) -> list[str]:
         """
         Chunk the given text into smaller pieces of specified size using the specified technique.
@@ -152,22 +102,18 @@ class ChunkingTechnique:
         """
         match technique:
             case "simple":
-                return self.chunk_text(text, chunk_size)
+                return self._chunk_text(text, chunk_size)
             case "character":
-                return self.langchain_character_text_splitter(
-                    text, chunk_size, chunk_overlap=chunk_overlap
+                return self._langchain_character_text_splitter(
+                    text=text, chunk_size=chunk_size, chunk_overlap=chunk_overlap
                 )
-            case "markdown":
-                return self.chunk_document(
-                    file_bytes=text.encode("utf-8"),
-                    payload={"filename": kwargs.get("filename", "")},
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                    technique="markdown",
+            case "sentenceSplitter":
+                return self._llamaindex_sentence_splitter(
+                    text=text, chunk_size=chunk_size, chunk_overlap=chunk_overlap
                 )
             case "recursive" | _:
-                return self.langchain_recursive_character_text_splitter(
-                    text, chunk_size, chunk_overlap=chunk_overlap
+                return self._langchain_recursive_character_text_splitter(
+                    text=text, chunk_size=chunk_size, chunk_overlap=chunk_overlap
                 )
 
 
