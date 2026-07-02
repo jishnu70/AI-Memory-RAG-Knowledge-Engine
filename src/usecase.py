@@ -1,11 +1,12 @@
 # src/usecase.py
 
-import asyncio
 import logging
 from typing import Optional
 from uuid import uuid4
 
+from docling_core.types.doc.document import DoclingDocument
 from fastapi import UploadFile
+from typing_extensions import deprecated
 
 from src.schemas.embed_data import EmbedData
 from src.services.chunking_technique import TECHNIQUES, ChunkingTechnique
@@ -51,7 +52,7 @@ class UseCase:
         """Handle file upload and processing based on the type of data."""
         try:
             file_path = await self._file_service.save_files(data)
-            await asyncio.to_thread(self.process_document_paths, file_path)
+            await self.process_document_paths(file_path)
         except Exception as e:
             logger.error(f"Error in handle_file_upload: {e}")
             raise e
@@ -76,54 +77,69 @@ class UseCase:
         """Process a list of files."""
         await self._handle_file_upload(files)
 
-    def process_document_paths(self, paths: list[str]) -> None:
+    @deprecated("WARNING: This method is EXPERIMENTAL and subject to breaking changes.")
+    def _handling_document_chunking_embedding_and_metadata(self, doc: DoclingDocument):
+        doc_id = str(uuid4())
+        filename: Optional[str] = None
+        if doc.origin and hasattr(doc.origin, "filename"):
+            filename = doc.origin.filename
+        elif hasattr(doc, "name"):
+            filename = doc.name
+        if not filename:
+            logger.warning(f"Document {doc} does not have a filename. Skipping.")
+            return
+
+        payload_texts: list[str] = []
+        embedded_dtos: list[EmbedData] = []
+
+        # 2. Extract and build everything in a single, efficient loop
+        for chunk_idx, (chunk_txt, meta) in enumerate(
+            self._chunking_strategy.chunk_docling_document(doc)
+        ):
+            payload_texts.append(chunk_txt)
+            embedded_dtos.append(
+                EmbedData(
+                    embedding=[],
+                    text=chunk_txt,
+                    metadata={
+                        "document_id": doc_id,
+                        "filename": filename,
+                        "chunk_index": chunk_idx,
+                        "source": "document",
+                        **meta.model_dump(),
+                    },
+                )
+            )
+
+        # check the raw chunks and metadata
+        for idx, dto in enumerate(embedded_dtos):
+            logger.warning(
+                f"Chunk {idx}: text length={len(dto.text)}, metadata={dto.metadata} \n chunk_text: {dto.text}",
+            )
+
+        # 3. Pass the pre-built lists directly to your service
+        all_embed_datas: list[EmbedData] = self._embedding_service.embed_dto(
+            payload=payload_texts,
+            embedded_dto=embedded_dtos,
+        )
+
+        self._vector_service.save(data=all_embed_datas)
+
+    async def process_document_paths(self, paths: list[str]) -> None:
         """Process a list of paths."""
         try:
             documents = self._document_loader.load_documents(paths)
             for document in documents:
                 try:
-                    doc_id = str(uuid4())
-                    filename: Optional[str] = None
-                    if document.origin and hasattr(document.origin, "filename"):
-                        filename = document.origin.filename
-                    elif hasattr(document, "name"):
-                        filename = document.name
-                    if not filename:
-                        logger.warning(
-                            f"Document {document} does not have a filename. Skipping."
-                        )
-                        continue
-
-                    chunks_with_meta = list(
-                        self._chunking_strategy.chunk_docling_document(doc=document)
-                    )
-                    embedded_chunks = self._embedding_service.embed(
-                        [chunk_txt for _, chunk_txt, _ in chunks_with_meta]
-                    )
-
-                    self._vector_service.save(
-                        data=[
-                            EmbedData(
-                                embedding=embedding,
-                                text=chunk_txt,
-                                metadata={
-                                    "document_id": doc_id,
-                                    "filename": filename,
-                                    "chunk_index": chunk_idx,
-                                    **meta.model_dump(),
-                                },
-                            )
-                            for (chunk_idx, chunk_txt, meta), embedding in zip(
-                                chunks_with_meta, embedded_chunks
-                            )
-                        ]
-                    )
+                    self._handling_document_chunking_embedding_and_metadata(document)
                 except Exception as e:
                     logger.error(f"Error processing document {document.name}: {e}")
                     continue  # Continue processing other documents even if one fails
         except Exception as e:
             logger.error(f"Critical error loading document path cluster: {e}")
             raise
+        finally:
+            await self._file_service.delete_files(paths)
 
     def process_texts(self, texts: list[str]) -> None:
         """Process a list of texts."""
@@ -157,11 +173,23 @@ class UseCase:
             vector_result = self._vector_service.retrieve(
                 query_vector=embeddings[0], top_k=top_k
             )
+            for item in vector_result:
+                print(
+                    f"score={item.score:.4f} | items={list(item.payload.items())} | preview={str(item.payload)[:100]}"  # type: ignore
+                )
             original_chunks = [
                 item.payload.get("text", "")  # type: ignore
                 for item in vector_result
             ]
-            results = "\n\n".join(original_chunks)
+            results = ""
+
+            for i, chunk in enumerate(original_chunks):
+                results += f"""
+            Context {i + 1}
+
+            {chunk}
+
+            """
             llm_response = self._llm_provider.generate(
                 context=results, user_input=query_text
             )
