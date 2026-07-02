@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from fastapi import UploadFile
 
+from src.schemas.embed_data import EmbedData
 from src.services.chunking_technique import TECHNIQUES, ChunkingTechnique
 from src.services.document_loader import DocumentLoader
 from src.services.embedding_service import EmbeddingService
@@ -67,13 +68,9 @@ class UseCase:
         embeddings = self._embedding_service.embed(chunks)
         return chunks, embeddings
 
-    def _handle_vector_addition(
-        self, embeddings: list[list[float]], original_chunk: list[str], **metadata
-    ) -> None:
+    def _handle_vector_addition(self, data: list[EmbedData]) -> None:
         """Handle adding vectors to the vector service."""
-        self._vector_service.save(
-            embedded_list=embeddings, original_chunk=original_chunk, **metadata
-        )
+        self._vector_service.save(data=data)
 
     async def process_documents(self, files: list[UploadFile]) -> None:
         """Process a list of files."""
@@ -85,39 +82,41 @@ class UseCase:
             documents = self._document_loader.load_documents(paths)
             for document in documents:
                 try:
-                    markdown_content = document.export_to_markdown()
-                    doc_chunks, embeddings = self._handle_chunking_and_embedding(
-                        markdown_content, "recursive"
-                    )
-
-                    if not doc_chunks:
-                        logger.warning(
-                            f"No chunks generated for document at {document.name}. Skipping."
-                        )
-                        continue
-
-                    page_count = len(document.pages) if document.pages else 0
+                    doc_id = str(uuid4())
                     filename: Optional[str] = None
-
                     if document.origin and hasattr(document.origin, "filename"):
                         filename = document.origin.filename
                     elif hasattr(document, "name"):
                         filename = document.name
-
                     if not filename:
                         logger.warning(
-                            f"Filename not found for document at {document.name}. Using 'unknown'."
+                            f"Document {document} does not have a filename. Skipping."
                         )
                         continue
 
-                    self._handle_vector_addition(
-                        embeddings=embeddings,
-                        original_chunk=doc_chunks,
-                        document_id=str(uuid4()),
-                        source="document",
-                        document_parser="docling-parser",
-                        filename=filename,
-                        page_count=page_count,
+                    chunks_with_meta = list(
+                        self._chunking_strategy.chunk_docling_document(doc=document)
+                    )
+                    embedded_chunks = self._embedding_service.embed(
+                        [chunk_txt for _, chunk_txt, _ in chunks_with_meta]
+                    )
+
+                    self._vector_service.save(
+                        data=[
+                            EmbedData(
+                                embedding=embedding,
+                                text=chunk_txt,
+                                metadata={
+                                    "document_id": doc_id,
+                                    "filename": filename,
+                                    "chunk_index": chunk_idx,
+                                    **meta.model_dump(),
+                                },
+                            )
+                            for (chunk_idx, chunk_txt, meta), embedding in zip(
+                                chunks_with_meta, embedded_chunks
+                            )
+                        ]
                     )
                 except Exception as e:
                     logger.error(f"Error processing document {document.name}: {e}")
@@ -132,9 +131,20 @@ class UseCase:
             try:
                 chunks, embeddings = self._handle_chunking_and_embedding(text)
                 self._handle_vector_addition(
-                    embeddings=embeddings,
-                    original_chunk=chunks,
-                    source="text",
+                    data=[
+                        EmbedData(
+                            embedding=embed_data,
+                            text=txt,
+                            metadata={
+                                "source": "text",
+                                "chunk_index": chunk_index,
+                                "text_length": len(txt),
+                            },
+                        )
+                        for chunk_index, (txt, embed_data) in enumerate(
+                            zip(chunks, embeddings)
+                        )
+                    ]
                 )
             except Exception as e:
                 logger.error(f"Error processing text: {e}")
@@ -148,7 +158,7 @@ class UseCase:
                 query_vector=embeddings[0], top_k=top_k
             )
             original_chunks = [
-                item.payload.get("original_chunk", "")  # type: ignore
+                item.payload.get("text", "")  # type: ignore
                 for item in vector_result
             ]
             results = "\n\n".join(original_chunks)
